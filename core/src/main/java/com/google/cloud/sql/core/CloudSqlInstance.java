@@ -393,8 +393,10 @@ class CloudSqlInstance {
    * would expire.
    */
   private ListenableFuture<InstanceData> performRefresh() throws InterruptedException {
+    logger.fine("Refreshing Cloud SQL InstanceData...");
     // To avoid unreasonable SQL Admin API usage, use a rate limit to throttle our usage.
     forcedRenewRateLimiter.acquirePermit();
+    logger.fine("Refreshing Cloud SQL InstanceData: Permit Acquired!");
     // Use the Cloud SQL Admin API to return the Metadata and Certificate
     ListenableFuture<Metadata> metadataFuture = executor.submit(this::fetchMetadata);
     ListenableFuture<Certificate> ephemeralCertificateFuture =
@@ -426,6 +428,7 @@ class CloudSqlInstance {
                 expiration = getTokenExpirationTime(credentials.get())
                     .filter(tokenExpiration -> x509Certificate.getNotAfter().after(tokenExpiration))
                     .orElse(x509Certificate.getNotAfter());
+                logger.info("IAM expiration: " + expiration);
               }
 
               return new InstanceData(
@@ -438,6 +441,7 @@ class CloudSqlInstance {
     Futures.addCallback(refreshFuture,
         new FutureCallback<InstanceData>() {
           public void onSuccess(InstanceData instanceData) {
+            logger.fine("Successfully acquired InstanceData!");
             synchronized (instanceDataGuard) {
               // update currentInstanceData with the most recent results
               currentInstanceData = refreshFuture;
@@ -640,12 +644,16 @@ class CloudSqlInstance {
   }
 
   private Optional<Date> getTokenExpirationTime(OAuth2Credentials credentials) {
-    return Optional.ofNullable(credentials.getAccessToken().getExpirationTime());
+    Date nextExpiry = credentials.getAccessToken().getExpirationTime();
+    logger.fine("Next token expiry is: " + nextExpiry);
+    return Optional.ofNullable(nextExpiry);
   }
 
   private Optional<Date> getTokenExpirationTime(Credential credentials) {
-    return Optional.ofNullable(credentials.getExpirationTimeMilliseconds())
+    Optional<Date> nextExpiry = Optional.ofNullable(credentials.getExpirationTimeMilliseconds())
         .map(expirationTime -> new Date(expirationTime));
+    logger.fine("Next cred expiry is: " + nextExpiry);
+    return nextExpiry;
   }
 
   /**
