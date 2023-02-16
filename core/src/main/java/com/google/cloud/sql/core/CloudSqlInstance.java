@@ -58,6 +58,7 @@ import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
@@ -201,6 +202,8 @@ class CloudSqlInstance {
 
           @Override
           public void onFailure(Throwable throwable) {
+            logger.log(Level.WARNING, "A future failed...", throwable);
+
             if (!taskFuture.setException(throwable)) {
               String msg = "Got more than one input failure. Logging failures after the first";
               logger.log(Level.SEVERE, msg, throwable);
@@ -334,6 +337,16 @@ class CloudSqlInstance {
     }
   }
 
+  private String formatDateForLog(Date date) {
+    if (date == null) {
+      return "null";
+    }
+    return date
+            .toInstant()
+            .atZone(ZoneId.of("America/Los_Angeles"))
+            .toString();
+  }
+
   /**
    * Returns an unconnected {@link SSLSocket} using the SSLContext associated with the instance. May
    * block until required instance data is available.
@@ -393,10 +406,10 @@ class CloudSqlInstance {
    * would expire.
    */
   private ListenableFuture<InstanceData> performRefresh() throws InterruptedException {
-    logger.fine("Refreshing Cloud SQL InstanceData...");
+    logger.info("Refreshing Cloud SQL InstanceData...");
     // To avoid unreasonable SQL Admin API usage, use a rate limit to throttle our usage.
     forcedRenewRateLimiter.acquirePermit();
-    logger.fine("Refreshing Cloud SQL InstanceData: Permit Acquired!");
+    logger.info("Refreshing Cloud SQL InstanceData: Permit Acquired!");
     // Use the Cloud SQL Admin API to return the Metadata and Certificate
     ListenableFuture<Metadata> metadataFuture = executor.submit(this::fetchMetadata);
     ListenableFuture<Certificate> ephemeralCertificateFuture =
@@ -428,14 +441,16 @@ class CloudSqlInstance {
                 expiration = getTokenExpirationTime(credentials.get())
                     .filter(tokenExpiration -> x509Certificate.getNotAfter().after(tokenExpiration))
                     .orElse(x509Certificate.getNotAfter());
-                logger.info("IAM expiration: " + expiration);
+                logger.info("IAM expiration: " + formatDateForLog(expiration));
 
                 // Accelerate the timeline a bit to facilitate faster testing...
                 Instant now = Instant.now();
                 if (Duration.between(now, expiration.toInstant()).toMinutes() > 6) {
                   Date newExpiration = Date.from(now.plusSeconds(60 * 6));
-                  logger.info("Fast forwarding IAM expiration: " + newExpiration);
+                  logger.info("Fast forwarding IAM expiration: " + formatDateForLog(newExpiration));
                   expiration = newExpiration;
+                } else {
+                  logger.info("Keeping IAM expiry as-is.");
                 }
               }
 
@@ -449,14 +464,16 @@ class CloudSqlInstance {
     Futures.addCallback(refreshFuture,
         new FutureCallback<InstanceData>() {
           public void onSuccess(InstanceData instanceData) {
-            logger.fine("Successfully acquired InstanceData!");
+            logger.info("Successfully acquired InstanceData!");
             synchronized (instanceDataGuard) {
               // update currentInstanceData with the most recent results
               currentInstanceData = refreshFuture;
               // schedule a replacement before the SSLContext expires;
+              Date exp = getInstanceData().getExpiration();
+              logger.info("Scheduling refresh for:" + formatDateForLog(exp));
               nextInstanceData = executor
                   .schedule(() -> performRefresh(),
-                      secondsUntilRefresh(getInstanceData().getExpiration()),
+                      secondsUntilRefresh(exp),
                       TimeUnit.SECONDS);
             }
           }
@@ -617,7 +634,9 @@ class CloudSqlInstance {
         String token = downscoped.getAccessToken().getTokenValue();
         // TODO: remove this once issue with OAuth2 Tokens is resolved.
         // See: https://github.com/GoogleCloudPlatform/cloud-sql-jdbc-socket-factory/issues/565
-        request.setAccessToken(CharMatcher.is('.').trimTrailingFrom(token));
+        String trimmed = CharMatcher.is('.').trimTrailingFrom(token);
+        logger.info("Ephemeral Cert token size is " + trimmed.length());
+        request.setAccessToken(trimmed);
       } catch (IOException ex) {
         throw addExceptionContext(
             ex,
@@ -653,14 +672,22 @@ class CloudSqlInstance {
 
   private Optional<Date> getTokenExpirationTime(OAuth2Credentials credentials) {
     Date nextExpiry = credentials.getAccessToken().getExpirationTime();
-    logger.fine("Next token expiry is: " + nextExpiry);
+    if (nextExpiry != null) {
+      logger.info("Next token expiry is: " + formatDateForLog(nextExpiry));
+    } else {
+      logger.info("Next token expiry is: null");
+    }
     return Optional.ofNullable(nextExpiry);
   }
 
   private Optional<Date> getTokenExpirationTime(Credential credentials) {
     Optional<Date> nextExpiry = Optional.ofNullable(credentials.getExpirationTimeMilliseconds())
         .map(expirationTime -> new Date(expirationTime));
-    logger.fine("Next cred expiry is: " + nextExpiry);
+    if (nextExpiry.isPresent()) {
+      logger.info("Next cred expiry is: " + formatDateForLog(nextExpiry.get()));
+    } else {
+      logger.info("Next cred expiry is: null");
+    }
     return nextExpiry;
   }
 
