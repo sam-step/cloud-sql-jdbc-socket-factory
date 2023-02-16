@@ -429,6 +429,14 @@ class CloudSqlInstance {
                     .filter(tokenExpiration -> x509Certificate.getNotAfter().after(tokenExpiration))
                     .orElse(x509Certificate.getNotAfter());
                 logger.info("IAM expiration: " + expiration);
+
+                // Accelerate the timeline a bit to facilitate faster testing...
+                Instant now = Instant.now();
+                if (Duration.between(now, expiration.toInstant()).toMinutes() > 6) {
+                  Date newExpiration = Date.from(now.plusSeconds(60 * 6));
+                  logger.info("Fast forwarding IAM expiration: " + newExpiration);
+                  expiration = newExpiration;
+                }
               }
 
               return new InstanceData(
